@@ -82,7 +82,7 @@ from lerobot.envs import (
     make_env_pre_post_processors,
     preprocess_observation,
 )
-from lerobot.envs.utils import NEW_ROLLOUT_OPTION
+from lerobot.envs.utils import NEW_ROLLOUT_OPTION, _sub_env_has_attr
 from lerobot.lerobot_types import PolicyAction
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
 from lerobot.processor import PolicyProcessorPipeline
@@ -224,6 +224,11 @@ def rollout(
     if render_callback is not None:
         render_callback(env)
 
+    task_attr = next(
+        (name for name in ("task_description", "task") if _sub_env_has_attr(env, name)),
+        None,
+    )
+
     recording_datasets: list[LeRobotDataset] | None = None
     raw_observation = None
     task_desc = ""
@@ -246,10 +251,8 @@ def rollout(
                 )
             )
         raw_observation = deepcopy(observation)
-        try:
-            task_desc = list(env.call("task_description"))[0]
-        except (AttributeError, NotImplementedError):
-            task_desc = ""
+        if task_attr is not None:
+            task_desc = list(env.call(task_attr))[0]
 
     all_observations = []
     all_actions = []
@@ -277,13 +280,7 @@ def rollout(
 
             # Infer "task" from sub-environments (prefer natural language description).
             # env.call() works with both SyncVectorEnv and AsyncVectorEnv.
-            try:
-                observation["task"] = list(env.call("task_description"))
-            except (AttributeError, NotImplementedError):
-                try:
-                    observation["task"] = list(env.call("task"))
-                except (AttributeError, NotImplementedError):
-                    observation["task"] = [""] * env.num_envs
+            observation["task"] = list(env.call(task_attr)) if task_attr is not None else [""] * env.num_envs
 
             # Apply environment-specific preprocessing (e.g., LiberoProcessorStep for LIBERO)
             observation = env_preprocessor(observation)
