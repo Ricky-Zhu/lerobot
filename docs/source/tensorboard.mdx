@@ -1,0 +1,27 @@
+# TensorBoard Logging
+
+Install the optional logger from your LeRobot checkout:
+
+```bash
+pip install -e '.[tensorboard]'
+```
+
+Add `--tensorboard.enable=true` to your `lerobot-train` command. Logs are
+written to `<output_dir>/tensorboard`; override this with
+`--tensorboard.log_dir=/path/to/run`. Use a separate directory for each run.
+
+```bash
+tensorboard --logdir /path/to/output/tensorboard
+```
+
+TensorBoard and W&B can be enabled independently or together. TensorBoard records
+training scalars at `log_freq`, held-out loss at `eval_steps`, and environment
+evaluation scalars at `env_eval_freq`, using `train/` and `eval/` tags. Nested
+evaluation metrics use slash-separated tags. The run configuration appears in
+the Text tab. Videos and checkpoint artifacts are handled by the existing W&B
+logger.
+
+Only the main process writes events. On checkpoint resume, reuse the log directory:
+events after the restored checkpoint step are hidden and replaced as training
+continues. Metrics are flushed at each logging interval, and the writer is closed
+when training exits, including Python exceptions.

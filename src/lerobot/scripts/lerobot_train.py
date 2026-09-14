@@ -33,7 +33,7 @@ import logging
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from pprint import pformat
 from typing import TYPE_CHECKING, Any
 import gym_pusht
@@ -45,6 +45,7 @@ from termcolor import colored
 from torch.optim import Optimizer
 from tqdm import tqdm
 
+from lerobot.common.tensorboard_utils import TensorBoardLogger
 from lerobot.common.train_utils import (
     get_step_checkpoint_dir,
     get_step_identifier,
@@ -383,6 +384,12 @@ def make_dataloaders(
 
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
+    """Train a policy and close logging resources on exit."""
+    with ExitStack() as cleanup:
+        return _train(cfg, cleanup)
+
+
+def _train(cfg: TrainPipelineConfig, cleanup: ExitStack):
     """
     Main function to train a policy.
 
@@ -577,6 +584,11 @@ def train(cfg: TrainPipelineConfig):
     if cfg.resume:
         resume_after_prepare(cfg, accelerator, policy, optimizer, lr_scheduler)
 
+    tensorboard_logger = None
+    if cfg.tensorboard.enable and is_main_process():
+        tensorboard_logger = TensorBoardLogger(cfg, step=step)
+        cleanup.callback(tensorboard_logger.close)
+
     # --- auxiliaries (after the core assembly, per the construction-order contract) -------------
     sample_weighter = None
     if cfg.sample_weighting is not None:
@@ -767,19 +779,22 @@ def train(cfg: TrainPipelineConfig):
                 if train_tracker.step_s.avg > 0:
                     train_tracker.samples_per_s = samples_per_step / train_tracker.step_s.avg
                 logging.info(train_tracker)
-                if wandb_logger:
+                if wandb_logger or tensorboard_logger:
                     # Policy sub-losses (latent_loss, action_loss, ...) are aggregated into the
                     # tracker by update_policy, so to_dict() already carries their windowed,
                     # rank-reduced averages — no per-step output_dict passthrough needed.
-                    wandb_log_dict = train_tracker.to_dict()
+                    train_log_dict = train_tracker.to_dict()
                     # Log sample weighting statistics if enabled
                     if sample_weighter is not None:
                         weighter_stats = sample_weighter.get_stats()
-                        wandb_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
+                        train_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
                     if ema is not None and ema.cur_decay_value is not None:
-                        wandb_log_dict["ema/decay"] = ema.cur_decay_value
-                        wandb_log_dict["ema/step"] = ema.optimization_step
-                    wandb_logger.log_dict(wandb_log_dict, step)
+                        train_log_dict["ema/decay"] = ema.cur_decay_value
+                        train_log_dict["ema/step"] = ema.optimization_step
+                    if wandb_logger:
+                        wandb_logger.log_dict(train_log_dict, step)
+                    if tensorboard_logger:
+                        tensorboard_logger.log_dict(train_log_dict, step)
             train_tracker.reset_averages()
 
         if is_eval_step:
@@ -803,6 +818,8 @@ def train(cfg: TrainPipelineConfig):
                 logging.info(f"step {step}: eval_loss={eval_loss:.4f}")
                 if wandb_logger:
                     wandb_logger.log_dict({"eval_loss": eval_loss}, step=step, mode="eval")
+                if tensorboard_logger:
+                    tensorboard_logger.log_dict({"eval_loss": eval_loss}, step=step, mode="eval")
 
         if cfg.save_checkpoint and is_saving_step:
             # Collective: every rank participates (gathers / DCP shard writes); rank-0-only file
@@ -896,6 +913,8 @@ def train(cfg: TrainPipelineConfig):
                 eval_tracker.avg_sum_reward = aggregated.pop("avg_sum_reward")
                 eval_tracker.avg_max_reward = aggregated.pop("avg_max_reward")
                 eval_tracker.pc_success = aggregated.pop("pc_success")
+                if tensorboard_logger:
+                    tensorboard_logger.log_dict({**eval_tracker.to_dict(), **eval_info}, step, mode="eval")
                 if wandb_logger:
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")

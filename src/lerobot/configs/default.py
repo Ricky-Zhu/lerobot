@@ -88,6 +88,12 @@ class DatasetConfig:
 
 
 @dataclass
+class TensorBoardConfig:
+    enable: bool = False
+    log_dir: str | None = None
+
+
+@dataclass
 class WandBConfig:
     enable: bool = False
     # Set to true to disable saving an artifact despite training.save_checkpoint=True
